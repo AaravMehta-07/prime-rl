@@ -141,6 +141,13 @@ def train(config: TrainerConfig):
             if checkpoint_step is None:
                 checkpoint_step = resolve_latest_ckpt_step(ckpt_manager.ckpt_dir)
 
+    # A run resumed from its final checkpoint (e.g. a requeued job that failed after
+    # finishing) has nothing left to train. Return before the weight broadcast setup,
+    # which would wait for an inference server the orchestrator never connects.
+    if config.max_steps is not None and checkpoint_step is not None and checkpoint_step >= config.max_steps:
+        logger.success(f"Resumed checkpoint step {checkpoint_step} already reached max_steps={config.max_steps}")
+        return
+
     # Initialize the model
     logger.info(f"Initializing model ({config.model})")
     t0 = time.perf_counter()
