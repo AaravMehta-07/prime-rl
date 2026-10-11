@@ -127,4 +127,5 @@ timeout 1 bash -c "echo > /dev/tcp/$WEIGHT_BROADCAST_HOST/$MODEL_EXPRESS_PORT" 2
     exit 1
 }
 {% endif %}
-launch uv run rl @ {{ config_path }} $RESUME_ARGS{% if use_nixl_broadcast %} --weight-broadcast.host "$WEIGHT_BROADCAST_HOST"{% endif %}
+# The resolved config pins trainer.resume / orchestrator.resume, so a restart overrides them too.
+launch uv run rl @ {{ config_path }} $RESUME_ARGS ${RESUME_ARGS:+--trainer.resume.step None --trainer.resume.dir None --orchestrator.resume.step None --orchestrator.resume.dir None}{% if use_nixl_broadcast %} --weight-broadcast.host "$WEIGHT_BROADCAST_HOST"{% endif %}

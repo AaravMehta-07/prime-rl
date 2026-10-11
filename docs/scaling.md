@@ -253,11 +253,20 @@ ModelExpress exchanges peer metadata during startup. Weight updates reuse prepar
 
 By default, the trainer and inference worker each allocate one transfer arena. Set `weight_broadcast.overlap_transfer_and_replay = true` to allocate two arenas on both sides and replay one weight group while receiving the next. The additional arena is the size of the largest transfer group per GPU; allocation errors are reported instead of silently disabling overlap.
 
-### Requeue and step watchdog
+### Requeue, smoke test and watchdog
 
-A failed job requeues itself (same job ID) up to `slurm.max_requeues` times (default 0: off). The job log keeps appending to `launcher/logs/job_<id>.log`, and component logs of restart `n` go to `logs/attempt_<k>/restart_<n>/`. Every RL and SFT component of a requeued job resumes from the latest complete checkpoint, so enable `[ckpt]` with an `interval`, or a requeue restarts training from scratch.
+With `slurm.max_requeues = N` (default 0: off), a failed job requeues itself (same job ID). It gives up after N requeues in a row without a new complete checkpoint; the count resets whenever a newer checkpoint is complete, so sporadic faults in a long run do not use up the budget, while a crash loop still stops. The job log keeps appending to `launcher/logs/job_<id>.log`, and component logs of restart `n` go to `logs/attempt_<k>/restart_<n>/`. Every RL and SFT component of a requeued job resumes from the latest complete checkpoint, so enable `[ckpt]` with an `interval`, or a requeue restarts training from scratch.
 
-The trainer master writes its last finished step to `<run_dir>/trainer_step` after every step. If `slurm.step_timeout` is set (default `None`: off) and that file is not updated for that many seconds, the job is killed with a message in the job log, and it requeues if `max_requeues` allows. The first window starts at job start and also covers startup, so set the timeout above the longest expected startup and step time.
+A SIGTERM sent only to the batch script of a running job requeues it without counting against the budget, once an in-flight trainer checkpoint has finished (waiting up to `slurm.cleanup_grace_period`). Use `scancel --signal=TERM --batch <job>` to restart a job, or `export SBATCH_SIGNAL=B:TERM@<seconds>` before launching to continue past `slurm.time`. A plain `scancel` and the hard time limit end the job without a requeue.
+
+`slurm.smoke_test = true` runs a short all-reduce over the GPUs of every node before the main command and again after it fails (2 min timeout). With `max_requeues`, nodes that fail it are added to the job's excluded nodes before it requeues.
+
+The trainer master writes `step <n>` to `<run_dir>/trainer_step` after every step and `ckpt <n>` before every checkpoint save. The job is killed (and requeues if `max_requeues` allows) when the trainer makes no progress for:
+- `slurm.startup_timeout` seconds from job start to the first finished step,
+- `slurm.step_timeout` seconds after a step,
+- `slurm.ckpt_timeout` seconds in a checkpoint save.
+
+Each is off by default (`None`).
 
 ### Custom Templates
 

@@ -156,10 +156,19 @@ class SlurmConfig(BaseConfig):
     """Seconds to wait before tearing down a multi-node RL job that hit a non-zero exit, letting in-flight checkpoints flush. Set to 0 to tear down immediately."""
 
     max_requeues: int = Field(0, ge=0)
-    """Requeue the job (same job ID) after it fails, at most this many times. A requeued RL or SFT job resumes from the latest complete checkpoint, overriding any ``resume.step`` / ``resume.dir`` of the first attempt. 0 (default) disables requeueing."""
+    """Requeue the job (same job ID) after it fails, at most this many times in a row without a new complete checkpoint: the count resets once a newer checkpoint is complete. A requeued RL or SFT job resumes from the latest complete checkpoint, overriding any ``resume.step`` / ``resume.dir`` of the first attempt. A SIGTERM sent only to the batch script of the running job (``scancel --signal=TERM --batch``, or ``SBATCH_SIGNAL=B:TERM@<seconds>`` before the time limit) also requeues it, without counting. 0 (default) disables requeueing."""
+
+    smoke_test: bool = False
+    """Before the job's main command and after it fails, run a short all-reduce over the GPUs of every node (2 min timeout). With ``max_requeues``, nodes that fail it are added to the job's excluded nodes and the job requeues."""
+
+    startup_timeout: int | None = Field(None, ge=60)
+    """Kill the job if the trainer has not finished its first step this many seconds after the job started (RL and SFT only). With ``max_requeues`` the job then requeues. None (default) disables this limit."""
 
     step_timeout: int | None = Field(None, ge=60)
-    """Kill the job if the trainer's step has not advanced for this many seconds; with ``max_requeues`` a requeue then resumes it (RL and SFT only). The first window starts at job start, so it must also cover startup (model load, first rollouts). None (default) disables the watchdog."""
+    """Kill the job if the trainer has not finished a step for this many seconds after its last step (RL and SFT only). None (default) disables this limit."""
+
+    ckpt_timeout: int | None = Field(None, ge=60)
+    """Kill the job if a trainer checkpoint save takes longer than this many seconds (RL and SFT only). None (default) disables this limit."""
 
     shared_fs: bool = True
     """Whether the project filesystem (including the venv) is shared across nodes (e.g. NFS). When True, a single ``uv sync`` on the batch node suffices. Set to False when the venv is node-local (e.g. ``UV_PROJECT_ENVIRONMENT`` on ``/tmp``) so ``uv sync`` runs on every node via srun."""
@@ -179,7 +188,10 @@ class SlurmConfig(BaseConfig):
             "cleanup_grace_period": self.cleanup_grace_period,
             "shared_fs": self.shared_fs,
             "max_requeues": self.max_requeues,
+            "smoke_test": self.smoke_test,
+            "startup_timeout": self.startup_timeout,
             "step_timeout": self.step_timeout,
+            "ckpt_timeout": self.ckpt_timeout,
         }
 
     @model_validator(mode="after")

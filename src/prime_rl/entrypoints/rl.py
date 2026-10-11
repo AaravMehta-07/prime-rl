@@ -15,6 +15,7 @@ from prime_rl.entrypoints.inference import vllm_overrides_fragment
 from prime_rl.utils.config import cli, dump_resolved_config
 from prime_rl.utils.logger import get_logger, setup_logger
 from prime_rl.utils.pathing import (
+    CKPT_COMMITTED_MARKER,
     abandon_future_ckpts,
     clean_future_steps,
     format_config_message,
@@ -322,6 +323,12 @@ def write_slurm_script(config: RLConfig, config_dir: Path, log_dir: Path, script
         "modelexpress_redis_port": 6380 if nixl_broadcast is not None and nixl_broadcast.port == 6379 else 6379,
     }
 
+    ckpt_base = (config.ckpt.output_dir if config.ckpt else None) or config.run_dir
+    requeue_vars = {
+        "trainer_step_path": get_trainer_step_path(config.run_dir),
+        "committed_ckpt_glob": get_ckpt_dir(ckpt_base) / "step_*" / CKPT_COMMITTED_MARKER,
+    }
+
     if config.deployment.type == "single_node":
         script = template.render(
             **config.slurm.template_vars,
@@ -331,7 +338,7 @@ def write_slurm_script(config: RLConfig, config_dir: Path, log_dir: Path, script
             log_dir=log_dir,
             output_dir=config.run_dir,
             launcher_dir=get_launcher_dir(config.run_dir),
-            trainer_step_path=get_trainer_step_path(config.run_dir),
+            **requeue_vars,
             launcher_log_dir=get_launcher_log_dir(config.run_dir),
             gpus_per_node=config.deployment.gpus_per_node,
         )
@@ -346,7 +353,7 @@ def write_slurm_script(config: RLConfig, config_dir: Path, log_dir: Path, script
             log_dir=log_dir,
             output_dir=config.run_dir,
             launcher_dir=get_launcher_dir(config.run_dir),
-            trainer_step_path=get_trainer_step_path(config.run_dir),
+            **requeue_vars,
             launcher_log_dir=get_launcher_log_dir(config.run_dir),
             num_train_nodes=config.deployment.num_train_nodes,
             num_infer_nodes=infer_deploy.num_nodes * config.deployment.num_infer_replicas,
@@ -392,7 +399,7 @@ def write_slurm_script(config: RLConfig, config_dir: Path, log_dir: Path, script
             log_dir=log_dir,
             output_dir=config.run_dir,
             launcher_dir=get_launcher_dir(config.run_dir),
-            trainer_step_path=get_trainer_step_path(config.run_dir),
+            **requeue_vars,
             launcher_log_dir=get_launcher_log_dir(config.run_dir),
             num_train_nodes=config.deployment.num_train_nodes,
             num_infer_nodes=config.deployment.total_infer_nodes,

@@ -335,8 +335,8 @@ def resolve_latest_ckpt_step(ckpt_dir: Path) -> int | None:
 
 
 def get_trainer_step_path(output_dir: Path) -> Path:
-    """The trainer master writes its last finished step here; the SLURM step watchdog
-    reads its mtime."""
+    """The trainer master writes ``step <n>`` here after every step and ``ckpt <n>`` before
+    every checkpoint save; the SLURM watchdog reads it."""
     return output_dir / "trainer_step"
 
 

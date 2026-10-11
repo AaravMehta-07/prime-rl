@@ -9,21 +9,108 @@ if [ "${SLURM_RESTART_COUNT:-0}" -gt 0 ]; then
     echo "Restart ${SLURM_RESTART_COUNT} of job ${SLURM_JOB_ID}"
 fi
 export RESUME_ARGS
-{%- if step_timeout and trainer_step_path is defined %}
+JOB_START=$(date +%s)
+{%- set watchdog = trainer_step_path is defined and (startup_timeout or step_timeout or ckpt_timeout) %}
+{%- if max_requeues %}
+mkdir -p {{ launcher_dir }}
 
-# Kill the job's main command when the trainer step (the mtime of trainer_step_path,
-# written by the trainer master after every step) has not advanced for step_timeout
-# seconds. The first window starts at job start.
-watch_trainer_step() {
-    local pid=$1 start last now
-    start=$(date +%s)
+job_state() {
+    scontrol show job "$SLURM_JOB_ID" | grep -oP 'JobState=\K\S+' || true
+}
+
+# Requeue the job (kind "failure" or "signal") and exclude the nodes given after the kind.
+# Failures count against max_requeues; the count resets when a newer complete checkpoint
+# exists. A job that is already ending (scancel, time limit) is not requeued.
+requeue() {
+    local kind=$1 latest="" last="" count=0 excluded
+    shift
+    if [ "$(job_state)" != RUNNING ]; then
+        return
+    fi
+    if [ "$kind" = failure ]; then
+{%- if committed_ckpt_glob is defined %}
+        latest=$(ls -d {{ committed_ckpt_glob }} 2>/dev/null | sort -V | tail -n 1)
+{%- endif %}
+        latest=${latest:-none}
+        [ ! -f {{ launcher_dir }}/requeue_$SLURM_JOB_ID ] || read -r last count < {{ launcher_dir }}/requeue_$SLURM_JOB_ID
+        [ "$latest" = "$last" ] || count=0
+        if [ "$count" -ge {{ max_requeues }} ]; then
+            echo "Not requeueing: {{ max_requeues }} requeues in a row without a new complete checkpoint"
+            return
+        fi
+        echo "$latest $((count + 1))" > {{ launcher_dir }}/requeue_$SLURM_JOB_ID
+        echo "Requeueing ($((count + 1)) of {{ max_requeues }} without a new complete checkpoint)"
+    fi
+    REQUEUEING=1
+    scontrol requeue "$SLURM_JOB_ID"
+    # Slurm only changes the excluded nodes of a job that is no longer running.
+    if [ $# -gt 0 ]; then
+        excluded=$(scontrol show job "$SLURM_JOB_ID" | grep -oP 'ExcNodeList=\K\S+' | grep -v null || true)
+        excluded=$(IFS=,; echo "${excluded:+$excluded,}$*")
+        scontrol update JobId="$SLURM_JOB_ID" ExcNodeList="$excluded" && echo "Excluded nodes: $excluded"
+    fi
+}
+
+# A SIGTERM to the batch script of a running job (scancel --signal=TERM --batch,
+# SBATCH_SIGNAL=B:TERM@<seconds>) requeues it without counting as a failure, after an
+# in-flight checkpoint finishes (up to cleanup_grace_period seconds).
+on_term() {
+    [ -z "${REQUEUEING:-}" ] || return 0
+    [ "$(job_state)" = RUNNING ] || exit 143
+    echo "Got SIGTERM - requeueing"
+{%- if trainer_step_path is defined %}
+    local deadline=$(($(date +%s) + {{ cleanup_grace_period }}))
+    while [ "$(stat -c %Y "{{ trainer_step_path }}" 2>/dev/null || echo 0)" -ge "$JOB_START" ] \
+        && grep -q '^ckpt' "{{ trainer_step_path }}" && [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 5
+    done
+{%- endif %}
+    requeue signal
+    exit 143
+}
+trap on_term TERM
+{%- endif %}
+{%- if smoke_test %}
+
+# Run a short all-reduce over the GPUs of every node; the nodes that fail or do not
+# answer within the timeout go to BAD_NODES.
+smoke_test() {
+    local passed={{ launcher_dir }}/smoke_test_$SLURM_JOB_ID
+    : > "$passed"
+    SMOKE_TEST_PASSED=$passed timeout 300 srun --ntasks-per-node=1 bash -s <<'SMOKE_TEST_SH' || true
+log=/tmp/prl-smoke-test-$SLURM_JOB_ID.log
+if timeout 120 torchrun --standalone --nproc-per-node="$SLURM_GPUS_ON_NODE" -m prime_rl.utils.smoke_test > "$log" 2>&1; then
+    echo "$SLURMD_NODENAME" >> "$SMOKE_TEST_PASSED"
+else
+    echo "[smoke test] failed on $SLURMD_NODENAME:"
+    tail -n 20 "$log"
+fi
+SMOKE_TEST_SH
+    BAD_NODES=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | grep -vxFf "$passed" | paste -sd' ' || true)
+    [ -z "$BAD_NODES" ]
+}
+{%- endif %}
+{%- if watchdog %}
+
+# Kill the job's main command when the trainer makes no progress: the trainer master
+# writes "step <n>" to trainer_step_path after every step and "ckpt <n>" before every
+# checkpoint save. Before the first write of this job the startup limit applies.
+watch_trainer() {
+    local pid=$1 mtime phase limit
     while kill -0 "$pid" 2>/dev/null; do
         sleep 30
-        last=$(stat -c %Y "{{ trainer_step_path }}" 2>/dev/null || echo 0)
-        [ "$last" -gt "$start" ] || last=$start
-        now=$(date +%s)
-        if [ $((now - last)) -ge {{ step_timeout }} ]; then
-            echo "[watchdog] trainer step has not advanced for $((now - last))s (last step: $(cat "{{ trainer_step_path }}" 2>/dev/null || echo none), step_timeout={{ step_timeout }}s) - killing the job"
+        mtime=$(stat -c %Y "{{ trainer_step_path }}" 2>/dev/null || echo 0)
+        if [ "$mtime" -lt "$JOB_START" ]; then
+            mtime=$JOB_START phase=startup limit={{ startup_timeout or 0 }}
+        else
+            phase=$(cat "{{ trainer_step_path }}" 2>/dev/null || true)
+            case "$phase" in
+                ckpt*) limit={{ ckpt_timeout or 0 }} ;;
+                *) limit={{ step_timeout or 0 }} ;;
+            esac
+        fi
+        if [ "$limit" -gt 0 ] && [ $(($(date +%s) - mtime)) -ge "$limit" ]; then
+            echo "[watchdog] no trainer progress for $(($(date +%s) - mtime))s (at: $phase, limit: ${limit}s) - killing the job"
             kill -TERM "$pid" 2>/dev/null
             sleep 60
             kill -KILL "$pid" 2>/dev/null
@@ -33,21 +120,36 @@ watch_trainer_step() {
 }
 {%- endif %}
 
-# Run the job's main command; requeue the job if it fails and restarts are left.
+# Run the job's main command; requeue the job if it fails.
 launch() {
+    local pid code=0
+{%- if smoke_test %}
+    if ! smoke_test; then
+        echo "Smoke test failed on: $BAD_NODES"
+{%- if max_requeues %}
+        requeue failure $BAD_NODES
+{%- endif %}
+        return 1
+    fi
+{%- endif %}
     "$@" <&0 &
-    local pid=$! code=0
-{%- if step_timeout and trainer_step_path is defined %}
-    watch_trainer_step "$pid" &
+    pid=$!
+{%- if watchdog %}
+    watch_trainer "$pid" &
     local watchdog_pid=$!
 {%- endif %}
     wait "$pid" || code=$?
-{%- if step_timeout and trainer_step_path is defined %}
+{%- if watchdog %}
     kill "$watchdog_pid" 2>/dev/null || true
 {%- endif %}
-    if [ "$code" -ne 0 ] && [ "${SLURM_RESTART_COUNT:-0}" -lt {{ max_requeues }} ]; then
-        echo "Job failed with exit code $code - requeueing (restart $((${SLURM_RESTART_COUNT:-0} + 1)) of {{ max_requeues }})"
-        scontrol requeue "$SLURM_JOB_ID"
+{%- if max_requeues %}
+    if [ "$code" -ne 0 ]; then
+        echo "Job failed with exit code $code"
+{%- if smoke_test %}
+        smoke_test || echo "Smoke test failed on: $BAD_NODES"
+{%- endif %}
+        requeue failure $BAD_NODES
     fi
+{%- endif %}
     return "$code"
 }

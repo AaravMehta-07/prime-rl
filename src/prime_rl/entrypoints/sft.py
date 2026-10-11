@@ -14,6 +14,7 @@ from prime_rl.entrypoints.dashboard import ensure_dashboard, log_dashboard_url
 from prime_rl.utils.config import cli, dump_resolved_config, find_package_resource
 from prime_rl.utils.logger import setup_logger
 from prime_rl.utils.pathing import (
+    CKPT_COMMITTED_MARKER,
     abandon_future_ckpts,
     clean_future_steps,
     format_config_message,
@@ -172,6 +173,11 @@ def write_slurm_script(
         **config.env_vars,
     }
 
+    requeue_vars = {
+        "trainer_step_path": get_trainer_step_path(config.run_dir),
+        "committed_ckpt_glob": get_ckpt_dir(get_ckpt_base(config)) / "step_*" / CKPT_COMMITTED_MARKER,
+    }
+
     if config.deployment.type == "single_node":
         script = template.render(
             **config.slurm.template_vars,
@@ -180,7 +186,7 @@ def write_slurm_script(
             log_dir=log_dir,
             output_dir=config.run_dir,
             launcher_dir=get_launcher_dir(config.run_dir),
-            trainer_step_path=get_trainer_step_path(config.run_dir),
+            **requeue_vars,
             launcher_log_dir=get_launcher_log_dir(config.run_dir),
             gpus_per_node=config.deployment.gpus_per_node,
         )
@@ -217,7 +223,7 @@ def write_slurm_script(
             log_dir=log_dir,
             output_dir=config.run_dir,
             launcher_dir=get_launcher_dir(config.run_dir),
-            trainer_step_path=get_trainer_step_path(config.run_dir),
+            **requeue_vars,
             launcher_log_dir=get_launcher_log_dir(config.run_dir),
             trainer_env_vars=trainer_env_vars,
             num_nodes=config.deployment.num_train_nodes,

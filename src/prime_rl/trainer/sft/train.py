@@ -91,7 +91,7 @@ def train(config: SFTConfig):
         )
     )
 
-    # The SLURM step watchdog reads the mtime of this file to see that training advances
+    # The SLURM watchdog reads this file to see that training advances
     trainer_step_path = get_trainer_step_path(config.run_dir)
     if world.is_master:
         trainer_step_path.parent.mkdir(parents=True, exist_ok=True)
@@ -546,6 +546,8 @@ def train(config: SFTConfig):
         is_ckpt_step = bool(config.ckpt and config.ckpt.interval) and progress.step % config.ckpt.interval == 0
         if ckpt_manager is not None and is_ckpt_step and not is_last_step:
             logger.info(f"Saving checkpoint at step {progress.step}")
+            if world.is_master:
+                trainer_step_path.write_text(f"ckpt {progress.step}")
             save_ckpt_start_time = time.perf_counter()
             ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress, dataloader=dataloader)
             save_ckpt_time += time.perf_counter() - save_ckpt_start_time
@@ -670,7 +672,7 @@ def train(config: SFTConfig):
         if heart is not None:
             heart.beat()
         if world.is_master:
-            trainer_step_path.write_text(str(progress.step))
+            trainer_step_path.write_text(f"step {progress.step}")
 
         if is_last_step:
             break
@@ -687,6 +689,8 @@ def train(config: SFTConfig):
     # Write final checkpoint
     if config.ckpt is not None:
         logger.info(f"Saving final checkpoint at step {progress.step}")
+        if world.is_master:
+            trainer_step_path.write_text(f"ckpt {progress.step}")
         ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress, dataloader=dataloader)
         ckpt_manager.maybe_clean()
 
