@@ -27,7 +27,16 @@ from prime_rl.trainer.models.fusions import (
 from prime_rl.trainer.optim import OffloadOptimizer, OptimizerLike
 from prime_rl.trainer.world import get_world
 from prime_rl.utils.logger import format_time, get_logger
-from prime_rl.utils.pathing import get_all_ckpt_steps, get_ckpt_dir, get_step_path
+from prime_rl.utils.pathing import (
+    CKPT_COMMITTED_MARKER,
+    get_all_ckpt_steps,
+    get_ckpt_dir,
+    get_committed_ckpt_steps,
+    get_step_path,
+)
+
+# How long the trainer master waits for the orchestrator's checkpoint of a step before leaving it uncommitted.
+COMMIT_WAIT_S = 600
 
 
 @dataclass
@@ -163,8 +172,15 @@ class AppState(Stateful):
 class CheckpointManager:
     """Utility class to save and load trainer checkpoints to resume SFT and RL training."""
 
-    def __init__(self, output_dir: Path, config: CheckpointConfig, resume: ResumeConfig | None = None):
+    def __init__(
+        self,
+        output_dir: Path,
+        config: CheckpointConfig,
+        resume: ResumeConfig | None = None,
+        wait_for_orchestrator: bool = False,
+    ):
         self.config = config
+        self.wait_for_orchestrator = wait_for_orchestrator
         self.skip_optimizer = config.skip_optimizer
         self.ckpt_dir = get_ckpt_dir(output_dir)
         self.logger = get_logger()
@@ -286,6 +302,21 @@ class CheckpointManager:
 
         self.save_to_path(ckpt_path, model, optimizers, scheduler, progress, dataloader)
         bisect.insort(self.ckpt_steps, step)
+        if self.world.is_master:
+            self.commit(step)
+
+    def commit(self, step: int) -> None:
+        """Mark ``step`` resumable. In RL, wait until the orchestrator's checkpoint of the step is on
+        disk too (normally it already is; for the final step the two save at the same time)."""
+        step_path = get_step_path(self.ckpt_dir, step)
+        orchestrator_ckpt = step_path / "orchestrator" / "progress.pt"
+        deadline = time.monotonic() + COMMIT_WAIT_S
+        while self.wait_for_orchestrator and not orchestrator_ckpt.exists():
+            if time.monotonic() > deadline:
+                self.logger.warning(f"Step {step} is not resumable: no orchestrator checkpoint at {orchestrator_ckpt}")
+                return
+            time.sleep(1)
+        (step_path / CKPT_COMMITTED_MARKER).touch()
 
     def maybe_clean(self) -> None:
         """Deletes past checkpoints based on keep_last and keep_interval policies. No-op if both are None."""
@@ -308,6 +339,9 @@ class CheckpointManager:
                 if step % self.config.keep_interval == 0:
                     steps_to_keep.add(step)
 
+        # Keep the resume point: the newest committed step
+        steps_to_keep.update(get_committed_ckpt_steps(self.ckpt_dir)[-1:])
+
         # Delete steps not in steps_to_keep (only master rank deletes to avoid race condition)
         ckpt_steps_to_delete = [step for step in self.ckpt_steps if step not in steps_to_keep]
         if self.world.is_master:
@@ -326,8 +360,10 @@ def setup_ckpt_manager(
     output_dir: Path,
     ckpt_config: CheckpointConfig | None,
     resume: ResumeConfig | None = None,
+    wait_for_orchestrator: bool = False,
 ) -> CheckpointManager:
     """The checkpoint manager always exists: ``resume`` decides whether it loads,
-    ``ckpt`` whether it saves (a resume without ``ckpt`` loads but saves nothing)."""
+    ``ckpt`` whether it saves (a resume without ``ckpt`` loads but saves nothing).
+    ``wait_for_orchestrator``: a step is committed only once the orchestrator saved it too (RL)."""
     ckpt_output_dir = (ckpt_config.output_dir if ckpt_config else None) or output_dir
-    return CheckpointManager(ckpt_output_dir, ckpt_config or CheckpointConfig(), resume)
+    return CheckpointManager(ckpt_output_dir, ckpt_config or CheckpointConfig(), resume, wait_for_orchestrator)

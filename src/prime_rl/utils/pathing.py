@@ -298,38 +298,39 @@ def get_all_ckpt_steps(ckpt_dir: Path) -> list[int]:
     return sorted([int(step_dir.name.split("_")[-1]) for step_dir in step_dirs])
 
 
-# The file each component writes last when it saves a checkpoint step.
-CKPT_COMPLETE_MARKERS = {"trainer": ".metadata", "orchestrator": "progress.pt"}
+# Written into ``step_N/`` by the trainer master once every component's checkpoint of step N is
+# on disk. Resume only picks committed steps.
+CKPT_COMMITTED_MARKER = "COMMITTED"
 
 
-def resolve_latest_ckpt_step(ckpt_dir: Path, components: tuple[str, ...]) -> int | None:
-    """Gets the latest checkpoint step that every component in ``components`` finished
-    saving. Steps without a complete checkpoint of each component (a save killed
-    mid-write, or the orchestrator checkpoint of a step the trainer never reached) are
-    skipped. Returns None if there are no checkpoints; raises if there are checkpoints
-    but none is complete."""
+def get_committed_ckpt_steps(ckpt_dir: Path) -> list[int]:
+    return [
+        step
+        for step in get_all_ckpt_steps(ckpt_dir)
+        if (get_step_path(ckpt_dir, step) / CKPT_COMMITTED_MARKER).exists()
+    ]
+
+
+def resolve_latest_ckpt_step(ckpt_dir: Path) -> int | None:
+    """Gets the latest committed checkpoint step. Uncommitted steps (a save killed mid-write,
+    or the orchestrator checkpoint of a step the trainer never reached) are skipped. Returns
+    None if there are no checkpoints; raises if there are checkpoints but none is committed."""
     logger = get_logger()
     all_steps = get_all_ckpt_steps(ckpt_dir)
     if len(all_steps) == 0:
         logger.warning(f"No checkpoints found in {ckpt_dir}. Starting from scratch.")
         return None
-    steps = [
-        step
-        for step in all_steps
-        if all(
-            (get_step_path(ckpt_dir, step) / component / CKPT_COMPLETE_MARKERS[component]).exists()
-            for component in components
-        )
-    ]
+    steps = get_committed_ckpt_steps(ckpt_dir)
     if len(steps) == 0:
         raise FileNotFoundError(
-            f"Checkpoint steps {all_steps} in {ckpt_dir} have no complete checkpoint of {list(components)} "
-            f"(markers: {[CKPT_COMPLETE_MARKERS[c] for c in components]}). Enable checkpointing for every "
-            "component (e.g. the shared [ckpt] in an RL run), or pass --resume.step explicitly. If this run set "
-            "ckpt.output_dir before orchestrator checkpoints followed it, move the step_N/orchestrator dirs from "
-            "<run_dir>/checkpoints into the matching step dirs here (or remove stale ones), or unset the override."
+            f"Checkpoint steps {all_steps} in {ckpt_dir} have no {CKPT_COMMITTED_MARKER} marker, which the trainer "
+            "writes once the trainer and orchestrator checkpoints of a step are complete. Pass --resume.step "
+            f"explicitly, or `touch step_N/{CKPT_COMMITTED_MARKER}` for a step you checked is complete (e.g. one "
+            "saved before the marker existed). If this run set ckpt.output_dir before orchestrator checkpoints "
+            "followed it, move the step_N/orchestrator dirs from <run_dir>/checkpoints into the matching step "
+            "dirs here first."
         )
-    logger.info(f"Found latest complete checkpoint in {ckpt_dir}: {steps[-1]}")
+    logger.info(f"Found latest committed checkpoint in {ckpt_dir}: {steps[-1]}")
     return steps[-1]
 
 

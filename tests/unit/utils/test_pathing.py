@@ -1,6 +1,7 @@
 import pytest
 
 from prime_rl.utils.pathing import (
+    CKPT_COMMITTED_MARKER,
     abandon_future_ckpts,
     clean_future_steps,
     create_attempt_dirs,
@@ -134,26 +135,16 @@ def test_abandon_future_ckpts_moves_them_out_of_resume(tmp_path):
     assert sorted(path.name for path in (ckpt_dir / "abandoned").glob("*/step_*")) == ["step_2", "step_3"]
 
 
-def test_resolve_latest_ckpt_step_skips_incomplete_steps(tmp_path):
+def test_resolve_latest_ckpt_step_picks_the_newest_committed_step(tmp_path):
     ckpt_dir = tmp_path / "checkpoints"
-    for step, files in {
-        10: ["trainer/.metadata", "orchestrator/progress.pt"],
-        20: ["trainer/.metadata", "orchestrator/progress.pt"],
-        30: ["trainer/__0_0.distcp", "orchestrator/progress.pt"],  # trainer save killed mid-write
-        34: ["orchestrator/progress.pt"],  # orchestrator ahead of the trainer
-    }.items():
-        for file in files:
-            path = get_step_path(ckpt_dir, step) / file
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch()
+    for step, committed in {10: True, 20: True, 30: False}.items():
+        get_step_path(ckpt_dir, step).mkdir(parents=True)
+        if committed:
+            (get_step_path(ckpt_dir, step) / CKPT_COMMITTED_MARKER).touch()
 
-    assert resolve_latest_ckpt_step(ckpt_dir, ("trainer", "orchestrator")) == 20
-    assert resolve_latest_ckpt_step(ckpt_dir, ("trainer",)) == 20
-    assert resolve_latest_ckpt_step(ckpt_dir, ("orchestrator",)) == 34
-    assert resolve_latest_ckpt_step(tmp_path / "missing", ("trainer",)) is None
-    # Steps exist but none is complete for these components: raise instead of starting from scratch
-    trainer_only = get_step_path(tmp_path / "trainer_only", 10) / "trainer"
-    trainer_only.mkdir(parents=True)
-    (trainer_only / ".metadata").touch()
+    assert resolve_latest_ckpt_step(ckpt_dir) == 20
+    assert resolve_latest_ckpt_step(tmp_path / "missing") is None
+    # Steps exist but none is committed: raise instead of starting from scratch
+    get_step_path(tmp_path / "uncommitted", 10).mkdir(parents=True)
     with pytest.raises(FileNotFoundError):
-        resolve_latest_ckpt_step(tmp_path / "trainer_only", ("trainer", "orchestrator"))
+        resolve_latest_ckpt_step(tmp_path / "uncommitted")
