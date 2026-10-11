@@ -23,6 +23,9 @@
 {%- if max_requeues %}
 #SBATCH --requeue
 #SBATCH --open-mode=append
+{%- if time %}
+#SBATCH --signal=B:TERM@{{ requeue_signal_grace }}
+{%- endif %}
 {%- endif %}
 
 # Exit immediately if any setup command or the launcher fails so the SLURM job

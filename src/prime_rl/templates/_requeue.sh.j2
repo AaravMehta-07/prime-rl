@@ -51,15 +51,15 @@ requeue() {
     fi
 }
 
-# A SIGTERM to the batch script of a running job (scancel --signal=TERM --batch,
-# SBATCH_SIGNAL=B:TERM@<seconds>) requeues it without counting as a failure, after an
-# in-flight checkpoint finishes (up to cleanup_grace_period seconds).
+# A SIGTERM to the batch script of a running job (scancel --signal=TERM --batch, or
+# --signal=B:TERM before the time limit) requeues it without counting as a failure,
+# after an in-flight checkpoint finishes (up to 30 s less than the signal's lead time).
 on_term() {
     [ -z "${REQUEUEING:-}" ] || return 0
     [ "$(job_state)" = RUNNING ] || exit 143
     echo "Got SIGTERM - requeueing"
 {%- if trainer_step_path is defined %}
-    local deadline=$(($(date +%s) + {{ cleanup_grace_period }}))
+    local deadline=$(($(date +%s) + {{ requeue_signal_grace - 30 }}))
     while [ "$(stat -c %Y "{{ trainer_step_path }}" 2>/dev/null || echo 0)" -ge "$JOB_START" ] \
         && grep -q '^ckpt' "{{ trainer_step_path }}" && [ "$(date +%s)" -lt "$deadline" ]; do
         sleep 5
@@ -69,6 +69,15 @@ on_term() {
     exit 143
 }
 trap on_term TERM
+
+# srun's error lines of the main command. With srun --kill-on-bad-exit, the first
+# "Exited with exit code" line names the node that failed first; the peers it takes
+# down show up after it.
+SRUN_ERRORS={{ launcher_dir }}/srun_errors_$SLURM_JOB_ID
+first_failed_node() {
+    sleep 1  # let the stderr reader flush
+    awk -F': ' '/^\[watchdog\]/ { exit } /^srun: error: .*: tasks? [0-9,-]+: Exited with exit code/ { print $3; exit }' "$SRUN_ERRORS" 2>/dev/null || true
+}
 {%- endif %}
 {%- if smoke_test %}
 
@@ -111,6 +120,9 @@ watch_trainer() {
         fi
         if [ "$limit" -gt 0 ] && [ $(($(date +%s) - mtime)) -ge "$limit" ]; then
             echo "[watchdog] no trainer progress for $(($(date +%s) - mtime))s (at: $phase, limit: ${limit}s) - killing the job"
+{%- if max_requeues %}
+            echo "[watchdog]" >> "$SRUN_ERRORS"
+{%- endif %}
             kill -TERM "$pid" 2>/dev/null
             sleep 60
             kill -KILL "$pid" 2>/dev/null
@@ -132,7 +144,12 @@ launch() {
         return 1
     fi
 {%- endif %}
+{%- if max_requeues %}
+    : > "$SRUN_ERRORS"
+    "$@" <&0 2> >(tee -a /dev/stderr | grep --line-buffered '^srun: error:' >> "$SRUN_ERRORS") &
+{%- else %}
     "$@" <&0 &
+{%- endif %}
     pid=$!
 {%- if watchdog %}
     watch_trainer "$pid" &
@@ -148,7 +165,7 @@ launch() {
 {%- if smoke_test %}
         smoke_test || echo "Smoke test failed on: $BAD_NODES"
 {%- endif %}
-        requeue failure $BAD_NODES
+        requeue failure $BAD_NODES $(first_failed_node)
     fi
 {%- endif %}
     return "$code"

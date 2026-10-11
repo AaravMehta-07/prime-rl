@@ -156,7 +156,7 @@ class SlurmConfig(BaseConfig):
     """Seconds to wait before tearing down a multi-node RL job that hit a non-zero exit, letting in-flight checkpoints flush. Set to 0 to tear down immediately."""
 
     max_requeues: int = Field(0, ge=0)
-    """Requeue the job (same job ID) after it fails, at most this many times in a row without a new complete checkpoint: the count resets once a newer checkpoint is complete. A requeued RL or SFT job resumes from the latest complete checkpoint, overriding any ``resume.step`` / ``resume.dir`` of the first attempt. A SIGTERM sent only to the batch script of the running job (``scancel --signal=TERM --batch``, or ``SBATCH_SIGNAL=B:TERM@<seconds>`` before the time limit) also requeues it, without counting. 0 (default) disables requeueing."""
+    """Requeue the job (same job ID) after it fails, at most this many times in a row without a new complete checkpoint: the count resets once a newer checkpoint is complete. A requeued RL or SFT job resumes from the latest complete checkpoint, overriding any ``resume.step`` / ``resume.dir`` of the first attempt. A SIGTERM sent only to the batch script of the running job also requeues it, without counting: ``scancel --signal=TERM --batch``, and, when ``time`` is set, the SIGTERM Slurm sends ``cleanup_grace_period`` seconds (60 to 600) before the time limit. 0 (default) disables requeueing."""
 
     smoke_test: bool = False
     """Before the job's main command and after it fails, run a short all-reduce over the GPUs of every node (2 min timeout). With ``max_requeues``, nodes that fail it are added to the job's excluded nodes and the job requeues."""
@@ -188,6 +188,7 @@ class SlurmConfig(BaseConfig):
             "cleanup_grace_period": self.cleanup_grace_period,
             "shared_fs": self.shared_fs,
             "max_requeues": self.max_requeues,
+            "requeue_signal_grace": max(60, min(self.cleanup_grace_period, 600)),
             "smoke_test": self.smoke_test,
             "startup_timeout": self.startup_timeout,
             "step_timeout": self.step_timeout,
