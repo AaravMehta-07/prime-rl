@@ -190,6 +190,8 @@ uv sync --all-extras --all-packages
 {{ pre_run_command }}
 {% endif %}
 
+{% include '_resume.sh.j2' %}
+
 # Cleanup stale node-local state from prior jobs. Orphan python/torchrun/vllm
 # processes and vLLM/torch IPC files under /dev/shm and /tmp can survive SLURM
 # termination and cause the next launch to hang (e.g. decode engines stuck at

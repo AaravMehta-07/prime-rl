@@ -176,6 +176,8 @@ def write_slurm_script(
     requeue_vars = {
         "trainer_step_path": get_trainer_step_path(config.run_dir),
         "committed_ckpt_glob": get_ckpt_dir(get_ckpt_base(config)) / "step_*" / CKPT_COMMITTED_MARKER,
+        "ckpt_dir": get_ckpt_dir(get_ckpt_base(config)),
+        "resume_latest": config.resume is not None and config.resume.dir is None and config.resume.step is None,
     }
 
     if config.deployment.type == "single_node":

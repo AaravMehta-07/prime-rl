@@ -130,6 +130,8 @@ uv sync --all-extras --all-packages
 {{ pre_run_command }}
 {% endif %}
 
+{% include '_resume.sh.j2' %}
+
 # Cleanup stale node-local state from prior jobs. Orphan python, torchrun, and
 # vLLM processes can otherwise retain GPUs or IPC files after SLURM termination.
 srun bash -s <<'CLEANUP_SH'
@@ -211,6 +213,7 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
                 @ $CONFIG_DIR/eval.json \
                 --client.base-url $INFER_URLS \
                 --client.admin-base-url $ADMIN_URLS \
+                ${RESUME_STEP:+--resume-step $RESUME_STEP} \
 {%- if use_nccl_broadcast %}
                 --weight-broadcast.host $MASTER_ADDR \
 {%- endif %}
